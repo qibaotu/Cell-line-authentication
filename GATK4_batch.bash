@@ -23,7 +23,7 @@ dbsnp_vcf=/pylon5/cc5fpcp/xiej/Cell_Line/resources/bundle/hg38/dbsnp_146.hg38.vc
 
 module load staraligner/2.5.2b
 
-: <<'END'
+
 	time STAR --runThreadN 6 \
 	--runMode genomeGenerate \
 	--genomeDir $genomeDir \
@@ -31,7 +31,7 @@ module load staraligner/2.5.2b
 	--sjdbGTFfile /pylon5/cc5fpcp/xiej/Cell_Line/resources/bundle/hg38/gencode.v26.primary_assembly.annotation.gtf \
 	--sjdbOverhang 99
 
-END
+
 
 
 ## STAR-- per sample 2-pass
@@ -174,4 +174,21 @@ time gatk VariantFiltration \
         --filter-name "my_filter" \
         -O /pylon5/cc5fpcp/xiej/Cell_Line/RST2/$(basename $file .vcf)_filtered.vcf
 done
+
+## install SnpEff
+wget http://sourceforge.net/projects/snpeff/files/snpEff_latest_core.zip
+# Unzip file
+unzip snpEff_latest_core.zip
+
+## download SnpEff databases
+cd /path/to/snpEff
+
+java -jar ./snpEff/snpEff.jar download hg38
+
+# annotate
+java -Xmx4g -jar ./snpEff/snpEff.jar -v -stats SRR24851145.html hg38 /pylon5/cc5fpcp/xiej/Cell_Line/SNP_annotation/SRR2481145_filtered.vcf >SRR2481145_filtered.ann.vcf
+
+# filter
+java -jar ./SnpSift.jar filter "(ANN[*].IMPACT = 'HIGH') & (FILTER='PASS') &(DP >=10)" /pylon5/cc5fpcp/xiej/Cell_Line/SNP_annotation/SRR2481145_filtered.ann.vcf >SRR2481145_filtered.ann.filtered.vcf
+
 
