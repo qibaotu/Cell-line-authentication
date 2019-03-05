@@ -1,0 +1,694 @@
+---
+title: "Cell line authentication"
+author: "Juan Xie"
+date: "March 5, 2019"
+output:
+  BiocStyle::html_document:
+    number_sections: no
+    toc: yes
+    highlight: pygments
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Background
+## Cell culture
+
+
+* The process by which cells are grown under controlled conditions, generally outside their natural environment.
+
+
+* One of the major tools used in cellular and molecular biology 
+
+
+    *+* Model systems for studying basic cell biology
+    
+    *+* Drug screening and development
+    
+    *+* Cancer research
+    
+    *+* ...
+![cell culture](/Users/juan.xie/Google Drive/cell line auth/image/cell culture.jpg)
+
+
+## Primary culture
+
+
+* Cell culture obtained straight from the cells of a host tissue and grown on a suitable container
+
+
+* Primary cells have a finite life span
+
+
+* Heterogenous population of cells
+
+
+## Cell lines
+
+
+* Sub-culturing of primary cells to different divisions
+
+
+## Cell line misidentification
+
+
+![cell line misidentification](/Users/juan.xie/Google Drive/cell line auth/image/misidentification.jpg)
+
+
+## Mehtods for cell line authentication
+
+
+* The analysis of Short Tandem Repeats(STRs)
+
+    *+* standard recommended by ATCC and ANSI
+    
+* Single Nucleotide Polymorphism/Variant(SNP/SNV)genotyping
+
+    *+* alleviate problems such as microsatellite instability
+    
+* The combination of the STRs and SNP/SNV genotyping
+
+
+# A pipeline for cell line authentication
+
+
+A study published at PLOS ONE in 2017 proposed a novel method that can interrogate the authenticity of biological samples used for generation of transcriptome profiles in public repositories.
+
+
+**Main idea**: use RNA sequencing information to reveal mutations in expressed transcripts and subsequently confirms the identity of analysed cells by comparison with publicly available cell-specific mutational profiles.
+
+
+fastq file --> Read alignment(STAR) --> variant calling(GATK) --> variant filtration --> variant annotation (SnpSift & SnpEff) --> Comparision with COSMIC data
+
+
+![pipeline](/Users/juan.xie/Google Drive/cell line auth/image/pipeline.jpg)
+
+
+**GATK best practice**
+
+
+GATK team introduced Best Practices for calling variant on RNA-seq based gatk v3.
+
+
+![pipeline](https://us.v-cdn.net/5019796/uploads/FileUpload/fa/e60ecf89bd1b2645d9fce68ccf3919.png)
+
+
+![pipeline2](![pipeline](https://us.v-cdn.net/5019796/uploads/FileUpload/c9/ac46784be39f31fa976b5ac944de17.png)
+
+
+
+
+
+
+**Current work**: implement this pipeline using GATK4 
+
+
+## Prepare1: download fastq files and reference fa & gtf & known variant sites
+
+
+* option 1: use **fastq-dump** from the SRA toolkit to download fastq files directly
+```{r,engine='bash',eval=FALSE,fastq-dump}
+for line in $(cat SRR_Acc_List_GSE73318.txt)
+do
+	fastq-dump --split-files $line
+done
+```
+
+
+* option 2: use **prefetch** from the SRA toolkit to download sra files first, then use **fastq-dump** to convert sra to fastq file
+```{r,engine='bash',eval=FALSE,prefetch}
+# prefetch sra 
+for line in $(cat SRR_Acc_List_GSE73318.txt)
+do
+	prefetch $line
+done
+
+
+# fastq-dump to convert
+for file in *sra
+do
+	fastq-dump --split-3 $file
+done
+
+
+```
+
+
+## Prepare2: download reference fa & gtf & known variant 
+```{r,engine='bash',eval=FALSE,download}
+wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/Homo_sapiens_assembly38.fasta.gz # ref genome
+
+
+wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/Homo_sapiens_assembly38.dict # sequence dictionary
+
+
+wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/Homo_sapiens_assembly38.fasta.fai 
+
+
+wget ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_26/gencode.v29.annotation.gtf.gz # gtf
+
+
+# known sites for vcv
+wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/dbsnp_146.hg38.vcf.gz
+
+
+wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/dbsnp_146.hg38.vcf.gz.tbi
+
+
+wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz
+
+
+wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz.tbi
+
+
+wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/1000G_phase1.snps.high_confidence.hg38.vcf.gz
+
+
+wget ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/1000G_phase1.snps.high_confidence.hg38.vcf.gz.tbi
+
+
+```
+
+
+## Step 1: Read alignment
+
+
+### STAR 2-pass alignment for single-end reads
+
+1). Build genome index from fasta file 
+
+
+Note that the genome index files that must be saved in unique directory
+```{r,engine='bash',eval=FALSE,star1}
+
+
+genomeDir=/path/to/hg38
+genomeFastaFiles=/path/to/Homo_sapiens_assembly38.fasta
+/path/to/gencode.v26.primary_assembly.annotation.gtf
+
+
+mkdir $genomeDir
+STAR --runThreadN 6 \
+    --runMode genomeGenerate \
+    --genomeDir $genomeDir \
+    --genomeFastaFiles $genomeFastaFiles \
+    --sjdbGTFfile /path/to/gencode.v26.primary_assembly.annotation.gtf \
+    --sjdOverhang 99
+    
+```
+
+
+2). Alignment
+```{r,engine='bash',eval=FALSE,pass1}
+
+
+runDir=/path/to/1pass
+mkdir $runDir
+cd $runDir
+STAR --runThreadN 6 \
+      --genomeDir $genomeDir \
+      --readFilesIn /path/to/fastq/*fastq  
+    
+```
+
+
+3). For the 2-pass STAR, a new index is then created using splice junction information contained in the file SJ.out.tab from the first pass:
+```{r,engine='bash',eval=FALSE,pass2}
+
+
+genomeDir=/path/to/hg38_2pass
+mkdir $genomeDir
+STAR --runThreadN 6 \
+      --runMode genomeGenerate \
+      --genomeDir $genomeDir \
+      --genomeFastaFiles hg19.fa \
+      --sjdbFileChrStartEnd /path/to/1pass/*out.tab \
+      --sjdbOverhang 99  
+    
+```
+
+
+4). The resulting index is then used to produce the final alignments as follows:
+```{r,engine='bash',eval=FALSE,align2}
+
+
+runDir=/path/to/2pass
+mkdir $runDir
+cd $runDir
+STAR --runThreadN 6 \
+      --genomeDir $genomeDir \
+      --readFilesIn /path/to/fastq/*fastq            
+    
+```
+
+### STAR 2-pass alignment for paired-end reads
+
+For paired-end reads, the general steps are similar to those for single-end reads, except that we need to supply **read1** and **read2** in the `--readFilesIn`.
+
+The script is as follows:
+
+```{r,engine='bash',eval=FALSE, paired-end}
+
+time STAR --runThreadN 6 \
+	--runMode genomeGenerate \
+  --genomeDir $genomeDir \
+	--genomeFastaFiles $genomeFastaFiles \
+	--sjdbGTFfile /pylon5/cc5fpcp/xiej/Cell_Line/resources/bundle/hg38/gencode.v26.primary_assembly.annotation.gtf \
+	--sjdbOverhang 99
+
+
+## STAR-- per sample 2-pass
+runDir=/pylon5/cc5fpcp/xiej/Cell_Line/RawData/Data2/1pass
+mkdir $runDir
+cd $runDir
+
+for r1 in /pylon5/cc5fpcp/xiej/Cell_Line/RawData/Data2/*1.fastq
+do
+
+# replace 1 with 2
+r2=${r1/1/2}
+
+time STAR --runThreadN 12 \
+--genomeDir $genomeDir \
+--readFilesIn $r1 $r2 \
+--outFileNamePrefix /pylon5/cc5fpcp/xiej/Cell_Line/RawData/Data2/1pass/$(basename $r1 _1.fastq)
+done
+
+
+
+## rebuild index
+genomeDir=/pylon5/cc5fpcp/xiej/Cell_Line/RawData/Data2/hg38_2pass
+mkdir $genomeDir
+STAR --runThreadN 12 \
+      --runMode genomeGenerate \
+      --genomeDir $genomeDir \
+      --genomeFastaFiles $genomeFastaFiles \
+      --sjdbFileChrStartEnd /pylon5/cc5fpcp/xiej/Cell_Line/RawData/Data2/1pass/*out.tab \
+      --sjdbOverhang 99  
+
+	  
+##
+runDir=/pylon5/cc5fpcp/xiej/Cell_Line/RawData/Data2/2pass
+mkdir $runDir
+cd $runDir
+
+for r1 in /pylon5/cc5fpcp/xiej/Cell_Line/RawData/Data2/*1.fastq
+do
+r2=${r1/1/2}
+
+time STAR --runThreadN 12 \
+--genomeDir $genomeDir \
+--readFilesIn $r1 $r2 \
+--outFileNamePrefix /pylon5/cc5fpcp/xiej/Cell_Line/RawData/Data2/2pass/$(basename $r1 _1.fastq)
+done    
+
+
+```
+
+
+## Step 2: Add read groups, sort, mark duplicates, and create index
+
+
+The above step produces a SAM file, which we then put through the usual Picard processing steps: adding read group information, sorting, marking duplicates and indexing.
+
+
+```{r,engine='bash',eval=FALSE,AddRG}
+
+for file in /pylon5/cc5fpcp/xiej/Cell_Line/2pass/*Aligned.out.sam
+do
+time gatk AddOrReplaceReadGroups \
+        -I $file \
+        -O  /pylon5/cc5fpcp/xiej/Cell_Line/RST2/$(basename $file Aligned.out.sam)_rg_added_sorted.bam \
+        -SO coordinate \
+        -RGID $(basename $file Aligned.out.sam) \
+        -RGLB rna \
+        -RGPL illumina \
+        -RGPU hiseq \
+        -RGSM $(basename $file Aligned.out.sam) 
+done         
+
+
+for file in /pylon5/cc5fpcp/xiej/Cell_Line/RST2/*rg_added_sorted.bam
+do
+time gatk MarkDuplicates \
+        -I $file \
+        -O /pylon5/cc5fpcp/xiej/Cell_Line/RST2/$(basename $file _rg_added_sorted.bam)_dedup.bam  \
+        -CREATE_INDEX true \
+        -VALIDATION_STRINGENCY SILENT \
+        -M /pylon5/cc5fpcp/xiej/Cell_Line/RST2/$(basename $file _rg_added_sorted.bam)_dedup.metrics
+done  
+```
+
+
+**Note1**: GATK requires that the header of .bam file must contain **@RG**. If we didn't set related parameters in the previous alignment step, we need to do this.
+
+**Note2**: Must pay special attention to the labels for read groups. Please refer to <https://gatkforums.broadinstitute.org/gatk/discussion/6472/read-groups>
+
+GATK staff recommended to process the biological replicate samples as the same sample from different libraries.
+
+So, for SRR2481145~SRR2481147, they are replicates of HCT116b, thus they should have the same RGSM 
+
+**Note3**: To see the read group information for a `BAM` file, use the following command:
+
+```{r, engine='bash',eval=FALSE,checkRG}
+samtools view -H SRR2481145_dedup.bam |grep '@RG'
+
+```
+
+And we can get something as the following:
+
+```{r, engine='bash',eval=FALSE,showSM}
+
+@RG   ID:SRR2481145_1  LB:rna  PL: illumina  SM: SRR2481145_1  PU: hiseq
+
+```
+
+
+If accidentially assign wrong RGSM, we may keep as it is and correct the g.vcf files before the final step of genotyp GVCFs.
+
+
+## Step 3: Split'N'Trim and reassign mapping qualities
+
+
+Next, we use a new GATK tool called SplitNCigarReads developed specially for RNAseq, which splits reads into exon segments (getting rid of Ns but maintaining grouping information) and hard-clip any sequences overhanging into the intronic regions.
+
+
+```{r,engine='bash',eval=FALSE,SplitN}
+genomeFastaFiles=/pylon5/cc5fpcp/xiej/Cell_Line/resources/bundle/hg38/Homo_sapiens_assembly38.fasta
+
+
+for file in /pylon5/cc5fpcp/xiej/Cell_Line/RST2/*dedup.bam 
+do
+time gatk SplitNCigarReads \
+        -R $genomeFastaFiles \
+        -I $file \
+        -O /pylon5/cc5fpcp/xiej/Cell_Line/RST2/$(basename $file _dedup.bam)_dedup_split.bam
+done
+```
+
+**Note**: In GATK3, we also need to reassign mapping qualities, because STAR assigns good alignments a MAPQ of 255 (which technically means "unknown" and is therefore meaningless to GATK). So we use the GATK's `ReassignOneMappingQuality` read filter to reassign all good alignments to the default value of 60. i.e., need to add three more arugments: `-rf ReassignOneMappingQuality -RMQF 255 -RMQT 60 -U ALLOW_N_CIGAR_READS`. However, in GATK these arguments no longer exist. Some suggest to set `--outSAMmapqUnique 60` during the STAR aligment, but one drawback is that we need to set 60 back to 255 if we want to do downstream analysis with Cufflinks (Cufflinkes expect 255 to be unique mapping, i.e., good mapping). 
+
+In GATK4, there is a new argument `--skip-mapping-quality-transform`, which turns off the mapping quality 255 -> 60 read transformer. The transformer is on by default to ensure that uniquely mapping reads assigned STAR's default 255 MQ aren't filtered out by HaplotypeCaller. Since the default for this argument is false, I think we are safe without the `-rf ReassignOneMappingQuality -RMQF 255 -RMQT 60 -U ALLOW_N_CIGAR_READS` setting.
+
+
+## Step 4: Indel realignment(optional)
+
+
+The code for GATK3 is as follows:
+```{r,engine='bash',eval=FALSE,IndelRealign}
+java -jar GenomeAnalysisTK.jar -T RealignerTargetCreator \
+        -R $genomeFastaFiles \
+        -I ./RST/SRR2481145_dedup_split.bam \
+        -O ./RST/SRR2481145_realign_interval.list \
+        -known ./resources/bundle/hg38/Mills_and_1000G_gold_standard.indels.hg38.vcf \
+		-known ./resources/bundle/hg38/1000G_phase1.snps.high_confidence.hg38.vcf
+
+
+java -jar GenomeAnalysisTK.jar -T IndelRealigner \
+        -R $genomeFastaFiles \
+        -I ./RST/SRR2481145_dedup_split.bam \
+        -known ./resources/bundle/hg38/Mills_and_1000G_gold_standard.indels.hg38.vcf \
+		-known ./resources/bundle/hg38/1000G_phase1.snps.high_confidence.hg38.vcf
+        -o ./RST/SRR2481145_realign.bam \
+        -targetIntervals ./RST/SRR2481145_interval.list
+```
+
+
+GATK team : We have found that performing realignment around indels can help rescue a few indels that would otherwise be missed, but to be honest the effect is **marginal**. So while it can't hurt to do it, we only recommend performing the realignment step if you have compute and time to spare (or if it's important not to miss any potential indels).
+
+
+## Step5: Base Recalibration
+
+
+```{r,engine='bash',eval=FALSE,BQSR}
+for file in /pylon5/cc5fpcp/xiej/Cell_Line/RST2/*dedup_split.bam
+do
+
+time gatk BaseRecalibrator \
+        -R $genomeFastaFiles \
+        -I $file \
+        --known-sites /pylon5/cc5fpcp/xiej/Cell_Line/resources/bundle/hg38/1000G_phase1.snps.high_confidence.hg38.vcf.gz \
+        --known-sites /pylon5/cc5fpcp/xiej/Cell_Line/resources/bundle/hg38/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz \
+		--known-sites /pylon5/cc5fpcp/xiej/Cell_Line/resources/bundle/hg38/dbsnp_146.hg38.vcf.gz \
+        -O /pylon5/cc5fpcp/xiej/Cell_Line/RST2/$(basename $file _dedup_split.bam)_recal_data.table
+done
+
+## PrintReads used in GATK3 is replaced by ApplyBQSR
+for file in /pylon5/cc5fpcp/xiej/Cell_Line/RST2/*dedup_split.bam
+do
+time gatk ApplyBQSR \
+   -R $genomeFastaFiles \
+   -I $file \
+   --bqsr-recal-file /pylon5/cc5fpcp/xiej/Cell_Line/RST2/$(basename $file _dedup_split.bam)_recal_data.table \
+   -O $(basename $file _dedup_split.bam)_BQSR.bam
+done
+
+```
+
+
+## Step 6: Variant calling
+
+### For individual sample
+
+Use `HaplotypeCaller`
+```{r,engine='bash',eval=FALSE, HC}
+
+gatk HaplotypeCaller \
+        -R $genomeFastaFiles \
+        -I ./RST/SRR2481145_BQSR.bam \
+        -stand-call-conf 20.0 \
+        -O ./RST/SRR2481145.vcf
+
+```
+
+
+### For cohorts of samples
+
+To conduct variant calling on cohorts of samples(e.g., biological replicates), GATK has another Best Practice:
+
+![Variant calling for multiple samples](![cohorts pipeline](https://us.v-cdn.net/5019796/uploads/FileUpload/eb/44f317f8850ba74b64ba47b02d1bae.png)
+Basically, we first call variants individually on each sample using the `HaplotypeCaller` in `-ERC GVCF` mode, then perform a joint genotyping analysis of the gVCFs produced for all samples in a cohort.
+
+So, if there are replicates in the data, run `HaplotypeCaller` first with the `-ERC GVCF` argument first
+
+```{r,engine='bash',eval=FALSE, HC2}
+gatk HaplotypeCaller \
+        -R $genomeFastaFiles \
+        -I ./RST/SRR2481145_BQSR.bam \
+        -stand-call-conf 20.0 \
+        -O ./RST/SRR2481145.g.vcf \
+        -ERC GVCF
+
+```
+
+If the sample names are not correct, we need to change them before combine gvcf from replicates. To do that, we can either use `sed -i s/oldstring/newstring/g file.g.vcf`,
+ or use `bcftools` (refer to <https://unix.stackexchange.com/questions/501658/how-to-substitute-strings-in-a-set-of-files-with-different-strings/501678#501678>) 
+ 
+```{r,engine='bash',eval=FALSE, rename}
+module load bcftools
+
+# names.txt is the created file where in each line show the old name and the desired new name delimited by a whitespace
+
+for file in *g.vcf
+do
+bcftools reheader -s names.txt $file >$(basename $file .g.vcf)_rename.g.vcf
+done
+
+mkdir temp
+mv *rename* temp
+rm *g.vcf
+cd temp
+rename _rename.g.vcf .g.vcf *vcf
+mv *vcf ../
+```
+
+Then run `CombineGVCFs` to combine the gvcf files from the same sample:
+
+```{r,engine='bash',eval=FALSE, combine}
+
+gatk CombineGVCFs \
+        -R $genomeFastaFiles \
+        -V ./RST/SRR2481145.g.vcf \
+        -V ./RST/SRR2481146.g.vcf \
+        -V ./RST/SRR2481147.g.vcf \
+        -O ./RST/HCT116b.g.vcf
+
+```
+
+**Note**:  the sample name for these replicates should be same. 
+
+And run `GenotypeGVCFs` to do joint genotyping:
+
+```{r,engine='bash',eval=FALSE, Genotype}
+
+gatk GenotypeGVCFs \
+        -R $genomeFastaFiles \
+        -V ./RST/HCT116b.g.vcf \
+        -O ./RST/HCT116b.vcf
+```
+
+SRR2481145, SRR2481146 and SRR2481147 are biological replicates from the same cell line. By running the above script, we will get a single vcf file for the three replicates.
+
+## Step 7: Variant filtering
+
+First, just keep SNPs.
+
+It is recommended to filter clusters of at least 3 SNPs that are within a window of 35 bases between them by adding `-window 35 -cluster 3` to your command. This filter recommendation is specific for RNA-seq data.
+
+As in DNA-seq, it is recommended to filter based on Fisher Strand values (FS > 30.0) and Qual By Depth values (QD < 2.0),i.e., keep the variants with FS <30.0 and QD >2.0.
+
+```{r,engine='bash',eval=FALSE, filter}
+
+gatk SelectVariants \
+     -R $genomeFastaFiles \
+     -V ./RST/HCT116b.vcf \
+     --select-type-to-include SNP \
+     -O ./RST/HCT116b.SNP.vcf
+
+gatk VariantFiltration \
+        -R $genomeFastaFiles \
+        -V ./RST/HCT116b.SNP.vcf \
+        -window 35 \
+        -cluster 3 \
+        --filter-expression "FS >30.0 || QD <2.0" \
+        --filter-name "my_filter" \
+        -O ./RST/HCT116b.filtered.vcf
+
+```
+
+**Note**: The correct expression for filter expression is not same as what provided in GATK document/UserGuide. The document said `--filterExpression "AB < 0.2 || MQ > 50" `, while in fact it should be `--filter-expression "AB < 0.2 || MQ > 50"`.
+
+### Interpretation of the vcf file
+
+The generated vcf file contains a lot of information, for detailed explaintion, please refer to <https://software.broadinstitute.org/gatk/documentation/article?id=11005>.
+
+
+## Step 8: Variant annotation and filteration
+
+Use **SnpEff** to annotate the resulting SNVs, yielding information on SNV typpe and putative impact. SNV types are classified either as HIGH, MODERATE, LOW or MODIFIER. 
+
+```{r,engine='bash',eval=FALSE, annotation}
+
+## install snpEff
+# Download latest version
+wget http://sourceforge.net/projects/snpeff/files/snpEff_latest_core.zip
+
+# Unzip file
+unzip snpEff_latest_core.zip
+
+## download SnpEff databases
+cd /path/to/snpEff
+
+java -jar ./snpEff/snpEff.jar download hg38
+
+# annotate
+java -Xmx4g -jar ./snpEff/snpEff.jar -v -stats HCT116b.html hg38 /pylon5/cc5fpcp/xiej/Cell_Line/SNP_annotation/HCT116b.filtered.vcf >HCT116b.filtered.ann.vcf
+
+```
+
+The input is the filtered `vcf` file generated in the GATK steps, and the output are three files:
+
+1). a vcf file with annotation information added to the INFO field
+
+2). a html file containing summary statistics about the variants and their annotations
+
+3). a txt file summarizing the number of variant types per gene.
+
+**Note1**:
+`HIGH` SNVs are variants that have a disruptive impact on protein sequence, probably causing protein tuncation, loss of function and so on.
+`MODERATE` SNVs include non-disruptive variants that might change protein effectiveness, whereas `LOW` SNVs are assumed to be mostly harmless or unlikelt to change protein function.
+`MODIFIER` are usually non-coding variants or variants affecting non-coding genes
+
+**Note2**:
+Different SnpEff databases may affect the annotation results,e.g., using **hg38**,
+we will get the following for gene PINK3:
+
+`ANN=T|3_prime_UTR_variant|MODIFIER|PINK1|PINK1|transcript|NM_032409.2|protein_coding|8/8|...`
+
+While using GRCh38.92, we will get the following:
+`ANN=T|3_prime_UTR_variant|MODIFIER|PINK1|ENSG00000158828|transcript|ENST00000321556.4|protein_coding|8/8|...`
+
+
+Using either **hg38** or **GRCh38.92** will encounter error message "ERROR_CHROMOSOME_NOT_FOUND". This is due to a difference between the chromosome names in input VCF file and the chromosome names in SnpEff's database. 
+
+
+After annotation, we can use **SnpSift** to further filter and manipulate annotated files.
+
+The paper indicated to filter the SNVs to include those containing the highest impact variants for each transcript; to remove those failed by the GATK filters for strand bias and quality score.
+
+```{r,engine='bash',eval=FALSE, SnpSift}
+
+# filter
+java -jar ./SnpSift.jar filter "(ANN[*].IMPACT = 'HIGH') & (FILTER='PASS') " /pylon5/cc5fpcp/xiej/Cell_Line/SNP_annotation/HCT116b_filtered.ann.vcf >HCT116b.filtered.ann.filtered.vcf
+
+```
+
+## Step9: Compare with COSMIC profiles
+
+The last step of the pipeline is to compare the annotated SNVs to the unique SNVs positions from COSMIC ( Catalogue Of Somatic Mutations In Cancer) , which is the world's largest and most comprehensive resource for exploring the impact of somatic mutations in human cancer.
+
+For this step, we can use the R package `seqCAT`
+
+```{r seqCAT,message=FALSE,warning=FALSE,eval=FALSE}
+installation
+if (!requireNamespace("BiocManager", quietly=TRUE))
+   install.packages("BiocManager")
+BiocManager::install("seqCAT")
+
+library(seqCAT)
+setwd('C:/Users/Juan.XIe/Google Drive/cell line auth/')
+
+# load vcf file
+
+# create SNV profiles
+create_profile('HCT116b.filtered.ann.filtered.vcf','HCT116b','HCT116b.profile.txt')
+
+```
+
+In order to use the COSMIC database, we need to register an account and download the needed files. The seqCAT package recommended to use the `CosmicCLP_MutantEexport.tsv.gz` file.
+
+```{r COSMIC profile, eval=FALSE}
+
+# file <- file.path("C:","Users","Juan.XIe","Google Drive","cell line auth","DATA","CosmicCLP_MutantEexport.tsv.gz")
+file <- system.file("extdata", "CosmicCLP_MutantExport.tsv.gz",
+                    package = "seqCAT")
+
+cell_lines <- list_cosmic(file)
+
+head(cell_lines)
+```
+
+We can check if the cell line of interest is available in the COSMIC database
+```{r check, eval=FALSE}
+any(grepl('HCT116',cell_lines))
+
+```
+
+Then we can read the profile for that particular cell line
+```{r readHCT,eval=FALSE}
+cosmic <- read_cosmic(file, "HCT116")
+head(cosmic)
+
+```
+Now we have a small, COSMIC SNV profile for the cell line, which we can compare to any other profile we may have data for . We can also check how many variants are listed in COSMIC for your particular cell:
+
+```{r compare,eval=FALSE}
+hct116 <- read_profile("HCT116b.profile.txt", "HCT116b")
+hct116_cosmic <- compare_profiles(hct116, cosmic)
+head(hct116_cosmic)
+similarity <-calculate_similarity(hct116_cosmic)
+similarity
+impacts <-plot_impacts(hct116_cosmic)
+impacts
+```
+
+
+# References
+1. https://software.broadinstitute.org/gatk/documentation/article.php?id=3891
+2. https://bioconductor.org/packages/release/bioc/vignettes/seqCAT/inst/doc/seqCAT.html
+3. https://software.broadinstitute.org/gatk/documentation/article?id=3893
+4. https://software.broadinstitute.org/gatk/documentation/article.php?id=3060 (regarding merging)
